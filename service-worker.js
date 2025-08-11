@@ -28,9 +28,18 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Bypass caching for dynamic API requests
+  // Only handle requests for our own origin. For external resources (e.g., Leaflet, map tiles, other sites),
+  // bypass the cache logic entirely. This prevents the service worker from hijacking
+  // navigations to other domains and ensures external resources are fetched normally.
+  const sameOrigin = url.origin === self.location.origin;
+  if (!sameOrigin) {
+    // Passthrough: let the browser handle cross-origin fetches and navigations
+    return;
+  }
+
+  // Bypass caching for dynamic API requests (Overpass/OCM)
   const isDynamicAPI = url.hostname.includes('overpass-api.de') || url.hostname.includes('api.openchargemap.io');
-  // Determine tile requests
+  // Determine OSM tile requests (for our tile caching layer)
   const isTiles = /tile\.openstreetmap\.org/.test(url.hostname);
   if (isDynamicAPI) {
     event.respondWith(
@@ -52,7 +61,8 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
-  // Otherwise, use cache-first for UI assets
+
+  // Otherwise (same-origin UI assets), use cache-first strategy
   event.respondWith(
     caches.match(event.request).then(hit => hit || fetch(event.request))
   );
