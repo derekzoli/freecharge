@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FreeCharge — colonnine gratuite entro 30 km</title>
+
+  <!-- PWA manifest and theme color -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0aa55c" />
+  <link rel="icon" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <!-- Leaflet styles and script -->
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    :root { --accent:#0aa55c; }
+    html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header{ padding:10px 12px; background:#111; color:#fff; display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+    header h1{ font-size:18px; margin:0; font-weight:600 }
+    header small{ opacity:.8 }
+    #map{ height: calc(100% - 200px); }
+    #panel{ padding:10px 12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:#f6f7f8; border-bottom:1px solid #e6e6e6 }
+    #list{ height:200px; overflow:auto; border-top:1px solid #e8e8e8; padding:8px 12px; }
+    .btn{ background:var(--accent); border:0; color:#fff; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:600 }
+    .btn.secondary{ background:#444 }
+    .pill{ padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; display:inline-block }
+    .pill.osm{ background:#e6f7ee; color:#0a7a4a; border:1px solid #bfead3 }
+    .pill.ocm{ background:#e6f0fb; color:#2a56c6; border:1px solid #c5d4fb }
+    .item{ padding:8px 0; border-bottom:1px dashed #ddd }
+    .muted{ color:#666 }
+    .row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+    label{ font-size:14px }
+    input[type="text"]{ padding:6px 8px; border:1px solid #ccc; border-radius:6px }
+    input[type="range"]{ width:140px }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FreeCharge</h1><small>— colonnine gratuite entro 30 km</small>
+  </header>
+
+  <div id="panel" class="row">
+    <button id="btnLoc" class="btn">📍 Usa la mia posizione</button>
+    <button id="btnSearch" class="btn secondary">🔎 Cerca nell’area mappa</button>
+    <label>Raggio: <span id="radiusOut">30</span> km
+      <input id="radius" type="range" min="5" max="50" step="1" value="30">
+    </label>
+    <label><input id="incOCM" type="checkbox"> Includi OpenChargeMap</label>
+    <label>OCM API key: <input id="ocmKey" type="text" size="24" placeholder="(opzionale)"></label>
+  </div>
+
+  <div id="map"></div>
+  <div id="list"></div>
+
+  <script>
+    'use strict';
+
+    // Register service worker for offline support
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./service-worker.js')
+          .then(() => console.log('Service worker registered'))
+          .catch(err => console.warn('SW registration failed', err));
+      });
+    }
+
+    // Initialize map (Lugo RA default)
+    const map = L.map('map').setView([44.418, 11.913], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      maxZoom: 19,
+      attribution:'© OpenStreetMap'
+    }).addTo(map);
+    const markers = L.layerGroup().addTo(map);
+
+    const els = {
+      btnLoc: document.getElementById('btnLoc'),
+      btnSearch: document.getElementById('btnSearch'),
+      radius: document.getElementById('radius'),
+      radiusOut: document.getElementById('radiusOut'),
+      incOCM: document.getElementById('incOCM'),
+      ocmKey: document.getElementById('ocmKey'),
+      list: document.getElementById('list')
+    };
+    els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
+
+    // Haversine distance (in meters)
+    function haversine(lat1, lon1, lat2, lon2){
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    // Deduplicate points within threshold meters
+    function dedupeByProximity(items, thresholdMeters=25){
+      const out = [];
+      for(const p of items){
+        const match = out.find(o => haversine(o.lat,o.lon,p.lat,p.lon) <= thresholdMeters);
+        if(!match) out.push(p);
+        else {
+          const preferP = (p.source==='OSM' && p.free) ? p : match;
+          if(preferP !== match){
+            const idx = out.indexOf(match);
+            out[idx] = { ...match, ...p };
+          }
+        }
+      }
+      return out;
+    }
+
+    // Extract connectors from OSM tags
+    function connectorsFromOSMTags(tags={}){
+      const mapKey = {
+        'socket:type2':'Type2',
+        'socket:type2_combo':'CCS2',
+        'socket:chademo':'CHAdeMO',
+        'socket:type1':'Type1',
+        'socket:schuko':'Schuko',
+        'socket:tesla_supercharger':'Tesla SC'
+      };
+      const res = [];
+      for(const k in mapKey){
+        if(Object.prototype.hasOwnProperty.call(tags, k)){
+          const v = (tags[k] ?? '').toString().trim().toLowerCase();
+          if(v && v !== 'no' && v !== '0') res.push(mapKey[k]);
+        }
+      }
+      return res;
+    }
+
+    // Normalize OSM element
+    function normalizeOSM(el){
+      const isNode = Object.prototype.hasOwnProperty.call(el, 'lat');
+      const lat = isNode ? el.lat : (el.center?.lat);
+      const lon = isNode ? el.lon : (el.center?.lon);
+      const tags = el.tags || {};
+      if (lat==null || lon==null) return null;
+
+      const name = tags.name || 'Stazione di ricarica';
+      const operator = tags.operator || tags.brand || null;
+      const connectors = connectorsFromOSMTags(tags);
+      const power = tags['charging_power'] || tags['power'] || null;
+      const free = (tags.fee && tags.fee.toString().toLowerCase()==='no') ||
+                   (tags.charge && tags.charge.toString().trim()==='0');
+
+      return { source:'OSM', free: !!free, name, operator, lat, lon, raw:tags, power, connectors };
+    }
+
+    // Determine if OCM usage cost indicates free charging
+    function isOCMFree(usageCost){
+      if(!usageCost) return true;
+      const s = usageCost.toString().toLowerCase();
+      return /\bfree\b|\bgratis?\b|(^|\s)0\s*€|€\s*0\b|free\s*charging/.test(s);
+    }
+
+    // Normalize OCM POI
+    function normalizeOCM(item){
+      const a = item.AddressInfo || {};
+      if(a.Latitude==null || a.Longitude==null) return null;
+      const connections = Array.isArray(item.Connections) ? item.Connections : [];
+      const connectorTitles = connections
+        .map(c => (c.ConnectionType && c.ConnectionType.Title) || null)
+        .filter(Boolean)
+        .map(t => {
+          const s = t.toLowerCase();
+          if(s.includes('type 2')) return 'Type2';
+          if(s.includes('ccs') || s.includes('combo')) return 'CCS';
+          if(s.includes('chademo')) return 'CHAdeMO';
+          if(s.includes('schuko')) return 'Schuko';
+          if(s.includes('tesla')) return 'Tesla';
+          return t;
+        });
+      let power = null;
+      if(connections.length){
+        const k = connections.map(c => c.PowerKW || c.Power).filter(Boolean);
+        if(k.length) power = Math.max(...k) + ' kW';
+      }
+      return {
+        source: 'OCM',
+        free: isOCMFree(item.UsageCost),
+        name: a.Title || 'Punto di ricarica',
+        operator: (item.OperatorInfo && item.OperatorInfo.Title) || null,
+        lat: a.Latitude,
+        lon: a.Longitude,
+        power,
+        connectors: [...new Set(connectorTitles)],
+        raw: item
+      };
+    }
+
+    // Fetch OSM charging stations within radius
+    async function fetchOSM(lat, lon, radiusKm){
+      const R = Math.round(radiusKm * 1000);
+      const q = `\n        [out:json][timeout:25];\n        (\n          node["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          node["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n          way["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          way["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n          relation["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          relation["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n        );\n        out center tags;\n      `.trim();
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8' },
+        body: 'data=' + encodeURIComponent(q)
+      });
+      if(!res.ok) throw new Error('Overpass API error: ' + res.status);
+      const json = await res.json();
+      const arr = (json.elements || [])
+        .map(normalizeOSM)
+        .filter(Boolean)
+        .map(o => ({...o, free:true}));
+      return arr;
+    }
+
+    // Fetch OCM points within radius
+    async function fetchOCM(lat, lon, radiusKm, apiKey){
+      const url = new URL('https://api.openchargemap.io/v3/poi');
+      const params = {
+        output: 'json',
+        latitude: lat, longitude: lon,
+        distance: radiusKm, distanceunit: 'KM',
+        countrycode: 'IT',
+        maxresults: 200, compact: true, verbose: false
+      };
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+      if(apiKey) url.searchParams.set('key', apiKey);
+      const res = await fetch(url.toString());
+      if(!res.ok) throw new Error('OCM API error: ' + res.status);
+      const json = await res.json();
+      return json.map(normalizeOCM).filter(Boolean).filter(p => p.free);
+    }
+
+    // Render points to map and list
+    function render(items){
+      markers.clearLayers();
+      els.list.innerHTML = '';
+      items.forEach(p => {
+        const m = L.marker([p.lat, p.lon]).addTo(markers)
+          .bindPopup(`<b>${p.name}</b><br>${p.operator ?? ''}<br><small>${p.connectors?.join(', ') || '—'}</small>`);
+        const line = document.createElement('div');
+        line.className = 'item';
+        line.innerHTML = `\n          <div class="row">\n            <span class="pill ${p.source==='OSM' ? 'osm' : 'ocm'}">${p.source === 'OSM' ? 'Gratis confermato (OSM)' : 'Gratis probabile (OCM)'}</span>\n            <strong>${p.name}</strong>\n            <span class="muted">${p.operator ?? ''}</span>\n          </div>\n          <div class="muted">${p.connectors?.length ? p.connectors.join(', ') : 'Connettori: n/d'} ${p.power ? ' · ~' + p.power : ''}</div>\n          <div><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}">Apri navigazione</a></div>\n        `;
+        line.addEventListener('mouseenter', () => m.openPopup());
+        els.list.appendChild(line);
+      });
+    }
+
+    // Search for points around lat/lon
+    async function searchAround(lat, lon){
+      const radiusKm = Number(els.radius.value);
+      try{
+        els.btnSearch.disabled = true;
+        els.btnSearch.textContent = '⏳ Cerco...';
+        const osm = await fetchOSM(lat, lon, radiusKm);
+        let items = [...osm];
+        if(els.incOCM.checked){
+          const ocm = await fetchOCM(lat, lon, radiusKm, els.ocmKey.value.trim());
+          items = items.concat(ocm);
+        }
+        items = dedupeByProximity(items, 25);
+        items.sort((a,b) => a.source.localeCompare(b.source));
+        render(items);
+      }catch(err){
+        console.error(err);
+        alert('Errore durante la ricerca: ' + err.message);
+      }finally{
+        els.btnSearch.disabled = false;
+        els.btnSearch.textContent = '🔎 Cerca nell’area mappa';
+      }
+    }
+
+    // Handle geolocation button
+    els.btnLoc.addEventListener('click', async () => {
+      if(!('geolocation' in navigator)){
+        alert('Geolocalizzazione non disponibile nel browser.');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(async pos => {
+        const { latitude:lat, longitude:lon } = pos.coords;
+        map.setView([lat,lon], 13);
+        await searchAround(lat, lon);
+      }, err => {
+        alert('Impossibile ottenere la posizione: ' + err.message);
+      }, { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
+    });
+
+    // Search around map center
+    els.btnSearch.addEventListener('click', () => {
+      const c = map.getCenter();
+      searchAround(c.lat, c.lng);
+    });
+
+    // Basic tests (logging to console) to catch regressions
+    (function runTests(){
+      const t1 = normalizeOSM({ lat:44, lon:11, tags:{ 'socket:type2':'yes', fee:'no' }});
+      console.assert(t1 && t1.free===true, 'OSM: fee=no => free');
+      console.assert(t1.connectors.includes('Type2'), 'OSM: socket:type2 yes => Type2');
+      const t2 = normalizeOSM({ lat:44, lon:11, tags:{ 'socket:type2':'0', fee:'no' }});
+      console.assert(!t2.connectors.includes('Type2'), 'OSM: socket:type2 0 => no connector');
+      console.assert(isOCMFree('Free charging for customers')===true, 'OCM: "Free" => true');
+      console.assert(isOCMFree('€ 0')===true, 'OCM: "€ 0" => true');
+      console.assert(isOCMFree('1€/kWh')===false, 'OCM: explicit cost => false');
+      console.log('✅ Test base completati');
+    })();
+  </script>
+</body>
+</html>
