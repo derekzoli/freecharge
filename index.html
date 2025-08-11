@@ -14,15 +14,32 @@
   <!-- Leaflet styles and script -->
   <link rel="preconnect" href="https://unpkg.com" crossorigin>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Load Leaflet JS synchronously so it is available before our inline script executes -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
     :root { --accent:#0aa55c; }
-    html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    /*
+     * Make the body a flex container so the map section can flexibly take up
+     * the remaining vertical space. Setting `height: 100vh` ensures the body
+     * fills the viewport and that flex items can base their sizes off of it.
+     */
+    html,body{ height:100vh; margin:0; display:flex; flex-direction:column; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     header{ padding:10px 12px; background:#111; color:#fff; display:flex; align-items:center; gap:10px; flex-wrap:wrap }
     header h1{ font-size:18px; margin:0; font-weight:600 }
     header small{ opacity:.8 }
-    #map{ height: calc(100% - 200px); }
+    /*
+     * NOTE: Use viewport units for the map height instead of percentage. When
+     * running inside a webview or PWA, the html/body elements may not have
+     * an explicit height. Using `100%` can result in a computed height of
+     * zero, causing the map container to collapse and remain invisible. By
+     * basing the calculation off the viewport height (`100vh`), we ensure the
+     * map always gets a sensible height no matter the parent element’s
+     * dimensions.
+     */
+    /* The map flexes to fill the space between the header/panel and the list. A
+     * minimum height prevents it from collapsing on very small screens. */
+    #map{ flex:1 1 auto; min-height:300px; }
     #panel{ padding:10px 12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:#f6f7f8; border-bottom:1px solid #e6e6e6 }
     #list{ height:200px; overflow:auto; border-top:1px solid #e8e8e8; padding:8px 12px; }
     .btn{ background:var(--accent); border:0; color:#fff; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:600 }
@@ -126,7 +143,8 @@
       const res = [];
       for(const k in mapKey){
         if(Object.prototype.hasOwnProperty.call(tags, k)){
-          const v = (tags[k] ?? '').toString().trim().toLowerCase();
+          // Use empty string fallback without nullish coalescing for broader browser support
+          const v = (tags[k] || '').toString().trim().toLowerCase();
           if(v && v !== 'no' && v !== '0') res.push(mapKey[k]);
         }
       }
@@ -136,8 +154,9 @@
     // Normalize OSM element
     function normalizeOSM(el){
       const isNode = Object.prototype.hasOwnProperty.call(el, 'lat');
-      const lat = isNode ? el.lat : (el.center?.lat);
-      const lon = isNode ? el.lon : (el.center?.lon);
+      // Avoid optional chaining for compatibility: check existence of center
+      const lat = isNode ? el.lat : ((el.center && el.center.lat) || null);
+      const lon = isNode ? el.lon : ((el.center && el.center.lon) || null);
       const tags = el.tags || {};
       if (lat==null || lon==null) return null;
 
@@ -234,11 +253,17 @@
       markers.clearLayers();
       els.list.innerHTML = '';
       items.forEach(p => {
+        // Build popup content without optional chaining or nullish coalescing
+        const popupOperator = p.operator || '';
+        const popupConnectors = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : '—';
         const m = L.marker([p.lat, p.lon]).addTo(markers)
-          .bindPopup(`<b>${p.name}</b><br>${p.operator ?? ''}<br><small>${p.connectors?.join(', ') || '—'}</small>`);
+          .bindPopup(`<b>${p.name}</b><br>${popupOperator}<br><small>${popupConnectors}</small>`);
         const line = document.createElement('div');
         line.className = 'item';
-        line.innerHTML = `\n          <div class="row">\n            <span class="pill ${p.source==='OSM' ? 'osm' : 'ocm'}">${p.source === 'OSM' ? 'Gratis confermato (OSM)' : 'Gratis probabile (OCM)'}</span>\n            <strong>${p.name}</strong>\n            <span class="muted">${p.operator ?? ''}</span>\n          </div>\n          <div class="muted">${p.connectors?.length ? p.connectors.join(', ') : 'Connettori: n/d'} ${p.power ? ' · ~' + p.power : ''}</div>\n          <div><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}">Apri navigazione</a></div>\n        `;
+        // Construct list item fields without optional chaining or nullish coalescing
+        const listOperator = p.operator || '';
+        const listConnectors = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : 'Connettori: n/d';
+        line.innerHTML = `\n          <div class="row">\n            <span class="pill ${p.source==='OSM' ? 'osm' : 'ocm'}">${p.source === 'OSM' ? 'Gratis confermato (OSM)' : 'Gratis probabile (OCM)'}</span>\n            <strong>${p.name}</strong>\n            <span class="muted">${listOperator}</span>\n          </div>\n          <div class="muted">${listConnectors} ${p.power ? ' · ~' + p.power : ''}</div>\n          <div><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}">Apri navigazione</a></div>\n        `;
         line.addEventListener('mouseenter', () => m.openPopup());
         els.list.appendChild(line);
       });
