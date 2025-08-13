@@ -102,7 +102,9 @@
       ocmKey: document.getElementById('ocmKey'),
       list: document.getElementById('list')
     };
-    els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
+els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
+els.ocmKey.value = '9a781dbf-a3ac-4a5f-aaf6-808505823a74';
+els.incOCM.checked = true;
 
     // Haversine distance (in meters)
     function haversine(lat1, lon1, lat2, lon2){
