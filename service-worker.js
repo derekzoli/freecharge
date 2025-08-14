@@ -1,5 +1,8 @@
 /* FreeCharge service worker: cache UI for offline use */
-const CACHE_NAME = 'freecharge-ui-v1';
+// Bump the UI cache version whenever you change HTML/CSS/JS assets.  This ensures that
+// updated files are fetched and cached instead of serving stale content.  When the
+// CACHE_NAME changes, old caches will be purged in the activate handler below.
+const CACHE_NAME = 'freecharge-ui-v2';
 const UI_ASSETS = [
   './',
   './index.html',
