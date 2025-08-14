@@ -233,17 +233,25 @@
       });
     let power = null;
     if(connections.length){
-      const k = connections.map(c => c.PowerKW || c.Power).filter(Boolean);
+      // Take the maximum of all reported PowerKW/Power values; fall back to null if none
+      const k = connections.map(c => c.PowerKW || c.Power || 0).filter(n => n > 0);
       if(k.length) power = Math.max(...k) + ' kW';
+    }
+    // Determine free status based on usageCost and override for known paid operators
+    let freeFlag = isOCMFree(item.UsageCost);
+    const opTitle = (item.OperatorInfo && item.OperatorInfo.Title) || null;
+    if(opTitle && /enel/i.test(opTitle)) {
+      freeFlag = false;
     }
     return {
       source:'OCM',
-      free: isOCMFree(item.UsageCost),
+      free: freeFlag,
       name: a.Title || 'Punto di ricarica',
-      operator: (item.OperatorInfo && item.OperatorInfo.Title) || null,
+      operator: opTitle,
       lat: a.Latitude,
       lon: a.Longitude,
-      power, connectors: [...new Set(connectorTitles)],
+      power: power,
+      connectors: [...new Set(connectorTitles)],
       raw: item
     };
   }
@@ -314,10 +322,19 @@
     items.forEach(p => {
       const div = document.createElement('div');
       div.className = 'item';
-      const conns = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : '—';
-      div.innerHTML = '<b>'+p.name+'</b> <span class="pill '+(p.source==='OSM'?'osm':'ocm')+'">'+p.source+'</span><br>'+
-        '<small class="muted">'+(p.operator || '')+'</small><br>'+
-        '<small>'+conns+'</small>';
+      // Build human-friendly strings
+      const connectors = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : 'Connettori: n/d';
+      const powerText = p.power ? ' · ~' + p.power : '';
+      const pillLabel = (p.source === 'OSM') ? 'Gratis confermato (OSM)' : 'Gratis probabile (OCM)';
+      div.innerHTML = `
+        <div class="row">
+          <span class="pill ${p.source==='OSM' ? 'osm' : 'ocm'}">${pillLabel}</span>
+          <strong>${p.name}</strong>
+          <span class="muted">${p.operator || ''}</span>
+        </div>
+        <div class="muted">${connectors}${powerText}</div>
+        <div><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}">Apri navigazione</a></div>
+      `;
       frag.appendChild(div);
     });
     els.list.replaceChildren(frag);
