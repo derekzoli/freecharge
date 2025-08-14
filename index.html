@@ -61,6 +61,14 @@
     #spinner{ width:16px; height:16px; border:2px solid #ddd; border-top-color:var(--accent); border-radius:50%; animation:spin 0.9s linear infinite; display:none }
     @keyframes spin { to { transform:rotate(360deg) } }
     #moreBtn{ display:none; margin-left:auto }
+
+    /* Modal styles for settings dialog */
+    .modal{ position:fixed; inset:0; z-index:9999 }
+    .modal-backdrop{ position:absolute; inset:0; background:rgba(0,0,0,.4) }
+    .modal-card{ position:relative; margin:12vh auto 0; max-width:520px; background:#fff; border-radius:10px; padding:16px; box-shadow:0 20px 50px rgba(0,0,0,.25) }
+    .field{ margin:12px 0 }
+    .password-wrap{ display:flex; gap:8px; align-items:center }
+    .btn.small{ padding:6px 8px; font-size:13px }
   </style>
 </head>
 <body>
@@ -75,13 +83,42 @@
       <input id="radius" type="range" min="5" max="50" step="1" value="10">
     </label>
     <label><input id="incOCM" type="checkbox"> Includi OpenChargeMap</label>
-    <label>OCM API key: <input id="ocmKey" type="text" size="24" placeholder="(opzionale)"></label>
+    <!-- Removed always-visible OCM key input.  A dedicated settings modal will handle the key. -->
+    <label><input id="onlyFreeStrict" type="checkbox" checked> Solo gratuite (rigoroso)</label>
+    <!-- Button to open the settings modal.  Placed at the far right via margin-left:auto. -->
+    <button id="btnSettings" class="btn secondary" style="margin-left:auto">⚙️ Impostazioni</button>
   </div>
 
   <div id="statusbar">
     <div id="spinner"></div>
     <div id="statusText" class="muted">Pronto.</div>
     <button id="moreBtn" class="btn secondary">Carica altre (espandi raggio)</button>
+  </div>
+
+  <!-- Modal impostazioni.  Hidden by default and shown when the user clicks the settings button. -->
+  <div id="settingsModal" class="modal" aria-hidden="true" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <h3 id="settingsTitle">Impostazioni</h3>
+
+      <div class="field">
+        <label for="ocmKeyInput">OCM API key</label>
+        <div class="password-wrap">
+          <input id="ocmKeyInput" type="password" placeholder="inserisci chiave" autocomplete="off">
+          <button id="toggleKey" type="button" class="btn secondary small">Mostra</button>
+        </div>
+        <small class="muted">La chiave è salvata solo nel tuo dispositivo (localStorage).</small>
+      </div>
+
+      <div class="field">
+        <label><input id="strictInModal" type="checkbox"> Solo gratuite (rigoroso)</label>
+      </div>
+
+      <div class="actions">
+        <button id="saveSettings" class="btn">Salva</button>
+        <button id="closeSettings" class="btn secondary">Chiudi</button>
+      </div>
+    </div>
   </div>
 
   <div id="map"></div>
@@ -114,11 +151,18 @@
     radius: document.getElementById('radius'),
     radiusOut: document.getElementById('radiusOut'),
     incOCM: document.getElementById('incOCM'),
-    ocmKey: document.getElementById('ocmKey'),
+    onlyFreeStrict: document.getElementById('onlyFreeStrict'),
     list: document.getElementById('list'),
     spinner: document.getElementById('spinner'),
     statusText: document.getElementById('statusText'),
-    moreBtn: document.getElementById('moreBtn')
+    moreBtn: document.getElementById('moreBtn'),
+    btnSettings: document.getElementById('btnSettings'),
+    settingsModal: document.getElementById('settingsModal'),
+    ocmKeyInput: document.getElementById('ocmKeyInput'),
+    toggleKey: document.getElementById('toggleKey'),
+    saveSettings: document.getElementById('saveSettings'),
+    closeSettings: document.getElementById('closeSettings'),
+    strictInModal: document.getElementById('strictInModal')
   };
   els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
 
@@ -132,9 +176,75 @@
     versionElem.textContent = now.toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' });
   }
 
-  /* Prefill OCM key + toggle */
-  els.ocmKey.value = '9a781dbf-a3ac-4a5f-aaf6-808505823a74';
+  /* ===================== SETTINGS LOAD ===================== */
+  // Keys for storing values in localStorage.  We persist the OCM API key and the
+  // strict (rigorous) filtering flag.  Values are per-device only.
+  const STORAGE_KEYS = {
+    ocmKey: 'fc_ocm_key',
+    strict: 'fc_only_free_strict'
+  };
+
+  // Save the current settings from the modal into localStorage.
+  function saveSettingsToStorage(){
+    try{
+      localStorage.setItem(STORAGE_KEYS.ocmKey, els.ocmKeyInput.value.trim());
+      localStorage.setItem(STORAGE_KEYS.strict, els.strictInModal.checked ? '1' : '0');
+    }catch{}
+  }
+
+  // Load settings from localStorage.  Returns an object with fields:
+  // { ocmKey: string, strict: boolean }.  If values are absent, defaults
+  // to empty string and true (strict filtering enabled).
+  function loadSettingsFromStorage(){
+    try{
+      const key = localStorage.getItem(STORAGE_KEYS.ocmKey) || '';
+      const strict = localStorage.getItem(STORAGE_KEYS.strict);
+      return { ocmKey: key, strict: strict == null ? true : strict === '1' };
+    }catch{
+      return { ocmKey:'', strict:true };
+    }
+  }
+
+  // Initialize UI based on stored settings: update the strict checkbox and leave
+  // the API key hidden (only editable via the modal).
+  const initSettings = loadSettingsFromStorage();
+  els.onlyFreeStrict.checked = initSettings.strict;
+  // incOCM is checked by default so that OCM is included unless user toggles.
   els.incOCM.checked = true;
+
+  /* ===================== SETTINGS MODAL FUNCTIONS ===================== */
+  // Open the settings modal: populate fields from storage and sync checkboxes.
+  function openSettings(){
+    const { ocmKey, strict } = loadSettingsFromStorage();
+    els.ocmKeyInput.value = ocmKey;
+    els.strictInModal.checked = strict;
+    // Sync toolbar strict checkbox
+    els.onlyFreeStrict.checked = strict;
+    els.settingsModal.style.display = 'block';
+    els.settingsModal.setAttribute('aria-hidden','false');
+  }
+  function closeSettings(){
+    els.settingsModal.style.display = 'none';
+    els.settingsModal.setAttribute('aria-hidden','true');
+  }
+  // Toggle visibility of the OCM key field between password and text.
+  els.toggleKey.addEventListener('click', () => {
+    const type = els.ocmKeyInput.type === 'password' ? 'text' : 'password';
+    els.ocmKeyInput.type = type;
+    els.toggleKey.textContent = (type === 'password') ? 'Mostra' : 'Nascondi';
+  });
+  // Save settings and update UI when user clicks "Salva".
+  els.saveSettings.addEventListener('click', () => {
+    saveSettingsToStorage();
+    // Reflect strict choice in toolbar
+    els.onlyFreeStrict.checked = els.strictInModal.checked;
+    closeSettings();
+    setStatus('Impostazioni salvate.', false);
+  });
+  // Close modal without saving when clicking "Chiudi".
+  els.closeSettings.addEventListener('click', closeSettings);
+  // Open modal when settings button is clicked.
+  els.btnSettings.addEventListener('click', openSettings);
 
   /* ===================== UTIL ===================== */
   function haversine(lat1, lon1, lat2, lon2){
@@ -210,15 +320,34 @@
   }
 
   /* ===================== NORMALIZZAZIONE OCM ===================== */
-  function isOCMFree(usageCost){
+  // List of operator name fragments that almost always indicate paid charging.  Used by
+  // strict filtering mode to reject likely paid stations.
+  const PAID_OPERATOR_HINTS = [
+    'enel', 'enel x', 'enel x way', 'becharge', 'be charge', 'plentitude',
+    'evway', 'duferco', 'a2a', 'hera', 'ionity', 'tesla', 'neogy'
+  ];
+  // Check for textual indications that a station is free (free, gratis, €0, etc.).
+  function hasFreeKeywords(s){
+    const t = s.toLowerCase();
+    return /\bfree\b|\bgratis?\b|(^|\s)0\s*(€|eur)?\b|€\s*0\b/.test(t);
+  }
+  // Determine free status under strict rules: explicit free cost AND not run by a known paid operator.
+  function isOCMFreeStrict(usageCost, operatorTitle){
+    const op = (operatorTitle || '').toLowerCase();
+    if(PAID_OPERATOR_HINTS.some(h => op.includes(h))) return false;
+    if(usageCost && hasFreeKeywords(String(usageCost))) return true;
+    return false;
+  }
+  // Determine free status under lenient rules: treat unknown cost as free by default.
+  function isOCMFreeLenient(usageCost){
     if(!usageCost) return true;
-    const s = usageCost.toString().toLowerCase();
-    return /\bfree\b|\bgratis?\b|(^|\s)0\s*€|€\s*0\b|free\s*charging/.test(s);
+    return hasFreeKeywords(String(usageCost));
   }
   function normalizeOCM(item){
     const a = item.AddressInfo || {};
     if(a.Latitude==null || a.Longitude==null) return null;
     const connections = Array.isArray(item.Connections) ? item.Connections : [];
+    // Map connection types to simplified names
     const connectorTitles = connections
       .map(c => (c.ConnectionType && c.ConnectionType.Title) || null)
       .filter(Boolean)
@@ -231,23 +360,23 @@
         if(s.includes('tesla')) return 'Tesla';
         return t;
       });
+    // Pick the maximum available power value from connections
     let power = null;
     if(connections.length){
-      // Take the maximum of all reported PowerKW/Power values; fall back to null if none
       const k = connections.map(c => c.PowerKW || c.Power || 0).filter(n => n > 0);
       if(k.length) power = Math.max(...k) + ' kW';
     }
-    // Determine free status based on usageCost and override for known paid operators
-    let freeFlag = isOCMFree(item.UsageCost);
-    const opTitle = (item.OperatorInfo && item.OperatorInfo.Title) || null;
-    if(opTitle && /enel/i.test(opTitle)) {
-      freeFlag = false;
-    }
+    // Compute free flag based on strictness and operator info
+    const opTitle = (item.OperatorInfo && item.OperatorInfo.Title) || '';
+    const usageCost = item.UsageCost || '';
+    const strict = !!els.onlyFreeStrict.checked;
+    const freeFlag = strict ? isOCMFreeStrict(usageCost, opTitle)
+                            : isOCMFreeLenient(usageCost);
     return {
       source:'OCM',
       free: freeFlag,
       name: a.Title || 'Punto di ricarica',
-      operator: opTitle,
+      operator: opTitle || null,
       lat: a.Latitude,
       lon: a.Longitude,
       power: power,
@@ -284,18 +413,28 @@
       .map(o => ({...o, free:true}));
     return arr;
   }
-  async function fetchOCM(lat, lon, radiusKm, apiKey){
+  async function fetchOCM(lat, lon, radiusKm){
+    // Retrieve API key and strict flag from storage.  The key is optional.
+    const { ocmKey } = loadSettingsFromStorage();
     const url = new URL('https://api.openchargemap.io/v3/poi');
     const params = {
       output: 'json',
-      latitude: lat, longitude: lon,
-      distance: radiusKm, distanceunit: 'KM',
+      latitude: lat,
+      longitude: lon,
+      distance: radiusKm,
+      distanceunit: 'KM',
       countrycode: 'IT',
-      maxresults: 200, compact: true, verbose: false
+      maxresults: 300,
+      compact: true,
+      verbose: false
     };
     Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
-    if(apiKey) url.searchParams.set('key', apiKey);
-    const res = await fetch(url.toString());
+    const options = {};
+    if(ocmKey){
+      // Use HTTP header recommended by OpenChargeMap to avoid logging the key in server logs
+      options.headers = { 'X-API-Key': ocmKey };
+    }
+    const res = await fetch(url.toString(), options);
     if(!res.ok) throw new Error('OCM API error: ' + res.status);
     const json = await res.json();
     return json.map(normalizeOCM).filter(Boolean).filter(p => p.free);
@@ -355,7 +494,8 @@
     if(fromCache){ return fromCache; }
     const tasks = [ fetchOSM(lat, lon, radiusKm) ];
     if(els.incOCM.checked){
-      tasks.push(fetchOCM(lat, lon, radiusKm, els.ocmKey.value.trim()));
+      // Fetch OCM using the stored API key; no need to pass it from UI
+      tasks.push(fetchOCM(lat, lon, radiusKm));
     }
     const results = await Promise.allSettled(tasks);
     const merged = []
