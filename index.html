@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FreeCharge — colonnine gratuite entro 30 km</title>
 
-  <!-- PWA manifest and theme color -->
+  <!-- PWA -->
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0aa55c" />
   <link rel="icon" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- Leaflet styles and script -->
+  <!-- Leaflet -->
   <link rel="preconnect" href="https://unpkg.com" crossorigin>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <!-- Load Leaflet JS synchronously so it is available before our inline script executes -->
@@ -19,28 +19,15 @@
 
   <style>
     :root { --accent:#0aa55c; }
-    /*
-     * Make the body a flex container so the map section can flexibly take up
-     * the remaining vertical space. Setting `height: 100vh` ensures the body
-     * fills the viewport and that flex items can base their sizes off of it.
-     */
+    /* Make the body a flex container so the map section can flexibly take up
+       the remaining vertical space. Setting `height: 100vh` ensures the body
+       fills the viewport and that flex items can base their sizes off of it. */
     html,body{ height:100vh; margin:0; display:flex; flex-direction:column; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     header{ padding:10px 12px; background:#111; color:#fff; display:flex; align-items:center; gap:10px; flex-wrap:wrap }
     header h1{ font-size:18px; margin:0; font-weight:600 }
     header small{ opacity:.8 }
-    /*
-     * NOTE: Use viewport units for the map height instead of percentage. When
-     * running inside a webview or PWA, the html/body elements may not have
-     * an explicit height. Using `100%` can result in a computed height of
-     * zero, causing the map container to collapse and remain invisible. By
-     * basing the calculation off the viewport height (`100vh`), we ensure the
-     * map always gets a sensible height no matter the parent element’s
-     * dimensions.
-     */
-    /* The map flexes to fill the space between the header/panel and the list. A
-     * minimum height prevents it from collapsing on very small screens. */
-    #map{ flex:1 1 auto; min-height:300px; }
     #panel{ padding:10px 12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:#f6f7f8; border-bottom:1px solid #e6e6e6 }
+    #map{ flex:1 1 auto; min-height:300px; }
     #list{ height:200px; overflow:auto; border-top:1px solid #e8e8e8; padding:8px 12px; }
     .btn{ background:var(--accent); border:0; color:#fff; padding:8px 12px; border-radius:6px; cursor:pointer; font-weight:600 }
     .btn.secondary{ background:#444 }
@@ -53,6 +40,11 @@
     label{ font-size:14px }
     input[type="text"]{ padding:6px 8px; border:1px solid #ccc; border-radius:6px }
     input[type="range"]{ width:140px }
+    /* Added statusbar, spinner, and more button styles for incremental loading */
+    #statusbar{ padding:8px 12px; display:flex; gap:8px; align-items:center; background:#fff; border-bottom:1px solid #eee }
+    #spinner{ width:16px; height:16px; border:2px solid #ddd; border-top-color:var(--accent); border-radius:50%; animation:spin 0.9s linear infinite; display:none }
+    @keyframes spin { to { transform:rotate(360deg) } }
+    #moreBtn{ display:none; margin-left:auto }
   </style>
 </head>
 <body>
@@ -70,264 +62,348 @@
     <label>OCM API key: <input id="ocmKey" type="text" size="24" placeholder="(opzionale)"></label>
   </div>
 
+  <div id="statusbar">
+    <div id="spinner"></div>
+    <div id="statusText" class="muted">Pronto.</div>
+    <button id="moreBtn" class="btn secondary">Carica altre (espandi raggio)</button>
+  </div>
+
   <div id="map"></div>
   <div id="list"></div>
 
   <script>
-    'use strict';
+  'use strict';
 
-    // Register service worker for offline support
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./service-worker.js')
-          .then(() => console.log('Service worker registered'))
-          .catch(err => console.warn('SW registration failed', err));
-      });
-    }
+  /* ===================== PWA SW ===================== */
+  if ('serviceWorker' in navigator) {
+    addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js')
+        .then(() => console.log('SW registrato'))
+        .catch(err => console.warn('SW non registrato', err));
+    });
+  }
 
-    // Initialize map (Lugo RA default)
-    const map = L.map('map').setView([44.418, 11.913], 12);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-      maxZoom: 19,
-      attribution:'© OpenStreetMap'
-    }).addTo(map);
-    const markers = L.layerGroup().addTo(map);
+  /* ===================== MAPPA ===================== */
+  const map = L.map('map').setView([44.418, 11.913], 12); // Lugo (RA) default
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom: 19,
+    attribution:'© OpenStreetMap'
+  }).addTo(map);
+  const markers = L.layerGroup().addTo(map);
 
-    const els = {
-      btnLoc: document.getElementById('btnLoc'),
-      btnSearch: document.getElementById('btnSearch'),
-      radius: document.getElementById('radius'),
-      radiusOut: document.getElementById('radiusOut'),
-      incOCM: document.getElementById('incOCM'),
-      ocmKey: document.getElementById('ocmKey'),
-      list: document.getElementById('list')
-    };
-els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
-els.ocmKey.value = '9a781dbf-a3ac-4a5f-aaf6-808505823a74';
-els.incOCM.checked = true;
+  /* ===================== UI refs ===================== */
+  const els = {
+    btnLoc: document.getElementById('btnLoc'),
+    btnSearch: document.getElementById('btnSearch'),
+    radius: document.getElementById('radius'),
+    radiusOut: document.getElementById('radiusOut'),
+    incOCM: document.getElementById('incOCM'),
+    ocmKey: document.getElementById('ocmKey'),
+    list: document.getElementById('list'),
+    spinner: document.getElementById('spinner'),
+    statusText: document.getElementById('statusText'),
+    moreBtn: document.getElementById('moreBtn')
+  };
+  els.radius.addEventListener('input', () => els.radiusOut.textContent = els.radius.value);
 
-    // Haversine distance (in meters)
-    function haversine(lat1, lon1, lat2, lon2){
-      const R = 6371000;
-      const toRad = d => d * Math.PI / 180;
-      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      return 2 * R * Math.asin(Math.sqrt(a));
-    }
+  /* Prefill OCM key + toggle */
+  els.ocmKey.value = '9a781dbf-a3ac-4a5f-aaf6-808505823a74';
+  els.incOCM.checked = true;
 
-    // Deduplicate points within threshold meters
-    function dedupeByProximity(items, thresholdMeters=25){
-      const out = [];
-      for(const p of items){
-        const match = out.find(o => haversine(o.lat,o.lon,p.lat,p.lon) <= thresholdMeters);
-        if(!match) out.push(p);
-        else {
-          const preferP = (p.source==='OSM' && p.free) ? p : match;
-          if(preferP !== match){
-            const idx = out.indexOf(match);
-            out[idx] = { ...match, ...p };
-          }
-        }
-      }
-      return out;
-    }
-
-    // Extract connectors from OSM tags
-    function connectorsFromOSMTags(tags={}){
-      const mapKey = {
-        'socket:type2':'Type2',
-        'socket:type2_combo':'CCS2',
-        'socket:chademo':'CHAdeMO',
-        'socket:type1':'Type1',
-        'socket:schuko':'Schuko',
-        'socket:tesla_supercharger':'Tesla SC'
-      };
-      const res = [];
-      for(const k in mapKey){
-        if(Object.prototype.hasOwnProperty.call(tags, k)){
-          // Use empty string fallback without nullish coalescing for broader browser support
-          const v = (tags[k] || '').toString().trim().toLowerCase();
-          if(v && v !== 'no' && v !== '0') res.push(mapKey[k]);
-        }
-      }
-      return res;
-    }
-
-    // Normalize OSM element
-    function normalizeOSM(el){
-      const isNode = Object.prototype.hasOwnProperty.call(el, 'lat');
-      // Avoid optional chaining for compatibility: check existence of center
-      const lat = isNode ? el.lat : ((el.center && el.center.lat) || null);
-      const lon = isNode ? el.lon : ((el.center && el.center.lon) || null);
-      const tags = el.tags || {};
-      if (lat==null || lon==null) return null;
-
-      const name = tags.name || 'Stazione di ricarica';
-      const operator = tags.operator || tags.brand || null;
-      const connectors = connectorsFromOSMTags(tags);
-      const power = tags['charging_power'] || tags['power'] || null;
-      const free = (tags.fee && tags.fee.toString().toLowerCase()==='no') ||
-                   (tags.charge && tags.charge.toString().trim()==='0');
-
-      return { source:'OSM', free: !!free, name, operator, lat, lon, raw:tags, power, connectors };
-    }
-
-    // Determine if OCM usage cost indicates free charging
-    function isOCMFree(usageCost){
-      if(!usageCost) return true;
-      const s = usageCost.toString().toLowerCase();
-      return /\bfree\b|\bgratis?\b|(^|\s)0\s*€|€\s*0\b|free\s*charging/.test(s);
-    }
-
-    // Normalize OCM POI
-    function normalizeOCM(item){
-      const a = item.AddressInfo || {};
-      if(a.Latitude==null || a.Longitude==null) return null;
-      const connections = Array.isArray(item.Connections) ? item.Connections : [];
-      const connectorTitles = connections
-        .map(c => (c.ConnectionType && c.ConnectionType.Title) || null)
-        .filter(Boolean)
-        .map(t => {
-          const s = t.toLowerCase();
-          if(s.includes('type 2')) return 'Type2';
-          if(s.includes('ccs') || s.includes('combo')) return 'CCS';
-          if(s.includes('chademo')) return 'CHAdeMO';
-          if(s.includes('schuko')) return 'Schuko';
-          if(s.includes('tesla')) return 'Tesla';
-          return t;
-        });
-      let power = null;
-      if(connections.length){
-        const k = connections.map(c => c.PowerKW || c.Power).filter(Boolean);
-        if(k.length) power = Math.max(...k) + ' kW';
-      }
-      return {
-        source: 'OCM',
-        free: isOCMFree(item.UsageCost),
-        name: a.Title || 'Punto di ricarica',
-        operator: (item.OperatorInfo && item.OperatorInfo.Title) || null,
-        lat: a.Latitude,
-        lon: a.Longitude,
-        power,
-        connectors: [...new Set(connectorTitles)],
-        raw: item
-      };
-    }
-
-    // Fetch OSM charging stations within radius
-    async function fetchOSM(lat, lon, radiusKm){
-      const R = Math.round(radiusKm * 1000);
-      const q = `\n        [out:json][timeout:25];\n        (\n          node["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          node["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n          way["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          way["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n          relation["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});\n          relation["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});\n        );\n        out center tags;\n      `.trim();
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8' },
-        body: 'data=' + encodeURIComponent(q)
-      });
-      if(!res.ok) throw new Error('Overpass API error: ' + res.status);
-      const json = await res.json();
-      const arr = (json.elements || [])
-        .map(normalizeOSM)
-        .filter(Boolean)
-        .map(o => ({...o, free:true}));
-      return arr;
-    }
-
-    // Fetch OCM points within radius
-    async function fetchOCM(lat, lon, radiusKm, apiKey){
-      const url = new URL('https://api.openchargemap.io/v3/poi');
-      const params = {
-        output: 'json',
-        latitude: lat, longitude: lon,
-        distance: radiusKm, distanceunit: 'KM',
-        countrycode: 'IT',
-        maxresults: 200, compact: true, verbose: false
-      };
-      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
-      if(apiKey) url.searchParams.set('key', apiKey);
-      const res = await fetch(url.toString());
-      if(!res.ok) throw new Error('OCM API error: ' + res.status);
-      const json = await res.json();
-      return json.map(normalizeOCM).filter(Boolean).filter(p => p.free);
-    }
-
-    // Render points to map and list
-    function render(items){
-      markers.clearLayers();
-      els.list.innerHTML = '';
-      items.forEach(p => {
-        // Build popup content without optional chaining or nullish coalescing
+  /* ===================== UTIL ===================== */
+  function haversine(lat1, lon1, lat2, lon2){
+    const R = 6371000, toRad = d => d*Math.PI/180;
+    const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+    return 2*R*Math.asin(Math.sqrt(a));
+  }
+  function gridKey(lat, lon){
+    return (Math.round(lat*100)/100).toFixed(2)+'_'+(Math.round(lon*100)/100).toFixed(2);
+  }
+  function setStatus(text, busy=false){
+    els.statusText.textContent = text;
+    els.spinner.style.display = busy ? 'inline-block' : 'none';
+  }
+  function batchAddMarkers(points){
+    let i=0;
+    function step(){
+      const end = Math.min(i+40, points.length);
+      for(; i<end; i++){
+        const p = points[i];
         const popupOperator = p.operator || '';
         const popupConnectors = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : '—';
-        const m = L.marker([p.lat, p.lon]).addTo(markers)
-          .bindPopup(`<b>${p.name}</b><br>${popupOperator}<br><small>${popupConnectors}</small>`);
-        const line = document.createElement('div');
-        line.className = 'item';
-        // Construct list item fields without optional chaining or nullish coalescing
-        const listOperator = p.operator || '';
-        const listConnectors = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : 'Connettori: n/d';
-        line.innerHTML = `\n          <div class="row">\n            <span class="pill ${p.source==='OSM' ? 'osm' : 'ocm'}">${p.source === 'OSM' ? 'Gratis confermato (OSM)' : 'Gratis probabile (OCM)'}</span>\n            <strong>${p.name}</strong>\n            <span class="muted">${listOperator}</span>\n          </div>\n          <div class="muted">${listConnectors} ${p.power ? ' · ~' + p.power : ''}</div>\n          <div><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}">Apri navigazione</a></div>\n        `;
-        line.addEventListener('mouseenter', () => m.openPopup());
-        els.list.appendChild(line);
+        L.marker([p.lat,p.lon]).addTo(markers)
+          .bindPopup('<b>'+p.name+'</b><br>' + popupOperator + '<br><small>' + popupConnectors + '</small>');
+      }
+      if(i < points.length) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+  function dedupeByProximity(items, meters=25){
+    const out = [];
+    for(const p of items){
+      const match = out.find(o => haversine(o.lat,o.lon,p.lat,p.lon) <= meters);
+      if(!match) out.push(p);
+    }
+    return out;
+  }
+
+  /* ===================== NORMALIZZAZIONE OSM ===================== */
+  function connectorsFromOSMTags(tags){
+    tags = tags || {};
+    const mapKey = {
+      'socket:type2':'Type2',
+      'socket:type2_combo':'CCS2',
+      'socket:chademo':'CHAdeMO',
+      'socket:type1':'Type1',
+      'socket:schuko':'Schuko',
+      'socket:tesla_supercharger':'Tesla SC'
+    };
+    const res = [];
+    for(const k in mapKey){
+      if(Object.prototype.hasOwnProperty.call(tags, k)){
+        const v = (tags[k] || '').toString().trim().toLowerCase();
+        if(v && v !== 'no' && v !== '0') res.push(mapKey[k]);
+      }
+    }
+    return res;
+  }
+  function normalizeOSM(el){
+    const isNode = Object.prototype.hasOwnProperty.call(el, 'lat');
+    const lat = isNode ? el.lat : ((el.center && el.center.lat) || null);
+    const lon = isNode ? el.lon : ((el.center && el.center.lon) || null);
+    const tags = el.tags || {};
+    if(lat==null || lon==null) return null;
+    const name = tags.name || 'Stazione di ricarica';
+    const operator = tags.operator || tags.brand || null;
+    const connectors = connectorsFromOSMTags(tags);
+    const power = tags['charging_power'] || tags['power'] || null;
+    const free = (tags.fee && tags.fee.toString().toLowerCase()==='no') ||
+                 (tags.charge && tags.charge.toString().trim()==='0');
+    return { source:'OSM', free: !!free, name, operator, lat, lon, raw:tags, power, connectors };
+  }
+
+  /* ===================== NORMALIZZAZIONE OCM ===================== */
+  function isOCMFree(usageCost){
+    if(!usageCost) return true;
+    const s = usageCost.toString().toLowerCase();
+    return /\bfree\b|\bgratis?\b|(^|\s)0\s*€|€\s*0\b|free\s*charging/.test(s);
+  }
+  function normalizeOCM(item){
+    const a = item.AddressInfo || {};
+    if(a.Latitude==null || a.Longitude==null) return null;
+    const connections = Array.isArray(item.Connections) ? item.Connections : [];
+    const connectorTitles = connections
+      .map(c => (c.ConnectionType && c.ConnectionType.Title) || null)
+      .filter(Boolean)
+      .map(t => {
+        const s = t.toLowerCase();
+        if(s.includes('type 2')) return 'Type2';
+        if(s.includes('ccs') || s.includes('combo')) return 'CCS';
+        if(s.includes('chademo')) return 'CHAdeMO';
+        if(s.includes('schuko')) return 'Schuko';
+        if(s.includes('tesla')) return 'Tesla';
+        return t;
       });
+    let power = null;
+    if(connections.length){
+      const k = connections.map(c => c.PowerKW || c.Power).filter(Boolean);
+      if(k.length) power = Math.max(...k) + ' kW';
     }
+    return {
+      source:'OCM',
+      free: isOCMFree(item.UsageCost),
+      name: a.Title || 'Punto di ricarica',
+      operator: (item.OperatorInfo && item.OperatorInfo.Title) || null,
+      lat: a.Latitude,
+      lon: a.Longitude,
+      power, connectors: [...new Set(connectorTitles)],
+      raw: item
+    };
+  }
 
-    // Search for points around lat/lon
-    async function searchAround(lat, lon){
-      const radiusKm = Number(els.radius.value);
-      try{
-        els.btnSearch.disabled = true;
-        els.btnSearch.textContent = '⏳ Cerco...';
-        const osm = await fetchOSM(lat, lon, radiusKm);
-        let items = [...osm];
-        if(els.incOCM.checked){
-          const ocm = await fetchOCM(lat, lon, radiusKm, els.ocmKey.value.trim());
-          items = items.concat(ocm);
-        }
-        items = dedupeByProximity(items, 25);
-        items.sort((a,b) => a.source.localeCompare(b.source));
-        render(items);
-      }catch(err){
-        console.error(err);
-        alert('Errore durante la ricerca: ' + err.message);
-      }finally{
-        els.btnSearch.disabled = false;
-        els.btnSearch.textContent = '🔎 Cerca nell’area mappa';
-      }
+  /* ===================== DATI: OSM + OCM ===================== */
+  async function fetchOSM(lat, lon, radiusKm){
+    const R = Math.round(radiusKm * 1000);
+    const q = `
+      [out:json][timeout:25];
+      (
+        node["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});
+        node["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});
+        way["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});
+        way["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});
+        relation["amenity"="charging_station"]["fee"="no"](around:${R},${lat},${lon});
+        relation["amenity"="charging_station"]["charge"="0"](around:${R},${lat},${lon});
+      );
+      out center tags;
+    `.trim();
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: 'data=' + encodeURIComponent(q)
+    });
+    if(!res.ok) throw new Error('Overpass API error: ' + res.status);
+    const json = await res.json();
+    const arr = (json.elements || [])
+      .map(normalizeOSM)
+      .filter(Boolean)
+      .map(o => ({...o, free:true}));
+    return arr;
+  }
+  async function fetchOCM(lat, lon, radiusKm, apiKey){
+    const url = new URL('https://api.openchargemap.io/v3/poi');
+    const params = {
+      output: 'json',
+      latitude: lat, longitude: lon,
+      distance: radiusKm, distanceunit: 'KM',
+      countrycode: 'IT',
+      maxresults: 200, compact: true, verbose: false
+    };
+    Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+    if(apiKey) url.searchParams.set('key', apiKey);
+    const res = await fetch(url.toString());
+    if(!res.ok) throw new Error('OCM API error: ' + res.status);
+    const json = await res.json();
+    return json.map(normalizeOCM).filter(Boolean).filter(p => p.free);
+  }
+
+  /* ===================== CACHE (localStorage) ===================== */
+  const CACHE_TTL_MS = 15*60*1000;
+  function cacheGet(key){
+    try{
+      const raw = localStorage.getItem(key);
+      if(!raw) return null;
+      const obj = JSON.parse(raw);
+      if(Date.now() - obj.t > CACHE_TTL_MS) return null;
+      return obj.data || null;
+    }catch{ return null; }
+  }
+  function cacheSet(key, data){
+    try{ localStorage.setItem(key, JSON.stringify({t:Date.now(), data})); }catch{}
+  }
+
+  /* ===================== RENDER LISTA ===================== */
+  function renderList(items){
+    const frag = document.createDocumentFragment();
+    items.forEach(p => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      const conns = (p.connectors && p.connectors.length) ? p.connectors.join(', ') : '—';
+      div.innerHTML = '<b>'+p.name+'</b> <span class="pill '+(p.source==='OSM'?'osm':'ocm')+'">'+p.source+'</span><br>'+
+        '<small class="muted">'+(p.operator || '')+'</small><br>'+
+        '<small>'+conns+'</small>';
+      frag.appendChild(div);
+    });
+    els.list.replaceChildren(frag);
+  }
+
+  /* ===================== LOGICA: caricamento incrementale ===================== */
+  let currentCenter = map.getCenter();
+  let staged = [5,10,20,30];
+  let stagedIndex = 0;
+  let combinedPoints = [];
+
+  function getCacheKey(lat, lon, radiusKm){
+    return 'fcache_'+gridKey(lat,lon)+'_'+radiusKm;
+  }
+  async function loadRadius(lat, lon, radiusKm){
+    const key = getCacheKey(lat, lon, radiusKm);
+    const fromCache = cacheGet(key);
+    if(fromCache){ return fromCache; }
+    const tasks = [ fetchOSM(lat, lon, radiusKm) ];
+    if(els.incOCM.checked){
+      tasks.push(fetchOCM(lat, lon, radiusKm, els.ocmKey.value.trim()));
     }
-
-    // Handle geolocation button
-    els.btnLoc.addEventListener('click', async () => {
-      if(!('geolocation' in navigator)){
-        alert('Geolocalizzazione non disponibile nel browser.');
-        return;
+    const results = await Promise.allSettled(tasks);
+    const merged = []
+      .concat(results[0].status==='fulfilled' ? results[0].value : [])
+      .concat(results[1] && results[1].status==='fulfilled' ? results[1].value : []);
+    const unique = dedupeByProximity(merged, 30);
+    cacheSet(key, unique);
+    return unique;
+  }
+  async function stagedLoad(startLat, startLon, fromIndex=0){
+    stagedIndex = fromIndex;
+    els.moreBtn.style.display = (stagedIndex < staged.length-1) ? 'inline-block' : 'none';
+    for(; stagedIndex<staged.length; stagedIndex++){
+      const r = staged[stagedIndex];
+      setStatus('Cerco entro '+r+' km...', true);
+      const points = await loadRadius(startLat, startLon, r);
+      const existing = combinedPoints;
+      const newly = points.filter(p => !existing.some(e => haversine(e.lat,e.lon,p.lat,p.lon) < 20));
+      if(newly.length){
+        combinedPoints = dedupeByProximity(existing.concat(newly), 20);
+        batchAddMarkers(newly);
+        renderList(combinedPoints);
       }
-      navigator.geolocation.getCurrentPosition(async pos => {
-        const { latitude:lat, longitude:lon } = pos.coords;
-        map.setView([lat,lon], 13);
-        await searchAround(lat, lon);
-      }, err => {
-        alert('Impossibile ottenere la posizione: ' + err.message);
-      }, { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
-    });
+      setStatus('Trovati '+combinedPoints.length+' punti (entro '+r+' km).', stagedIndex < staged.length-1);
+      els.moreBtn.style.display = (stagedIndex < staged.length-1) ? 'inline-block' : 'none';
+      if(stagedIndex === 0) break;
+    }
+  }
 
-    // Search around map center
-    els.btnSearch.addEventListener('click', () => {
-      const c = map.getCenter();
-      searchAround(c.lat, c.lng);
-    });
+  /* ===================== EVENTI UI ===================== */
+  els.btnLoc.addEventListener('click', () => {
+    setStatus('Rilevo la posizione...', true);
+    navigator.geolocation.getCurrentPosition(async pos => {
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
+      currentCenter = L.latLng(lat, lon);
+      map.setView(currentCenter, 13);
+      markers.clearLayers();
+      els.list.textContent = '';
+      combinedPoints = [];
+      stagedIndex = 0;
+      els.radius.value = 10; els.radiusOut.textContent = '10';
+      staged = [5,10,20,30];
+      await stagedLoad(lat, lon, 0);
+    }, err => {
+      setStatus('Posizione non disponibile. Usa “Cerca nell’area mappa”.', false);
+    }, { enableHighAccuracy:true, timeout:10000, maximumAge:60000 });
+  });
+  els.btnSearch.addEventListener('click', async () => {
+    const c = map.getCenter();
+    currentCenter = c;
+    markers.clearLayers(); els.list.textContent='';
+    combinedPoints = [];
+    const maxR = parseInt(els.radius.value,10) || 30;
+    staged = [5, Math.min(10,maxR)];
+    if(maxR>10) staged.push(20);
+    if(maxR>20) staged.push(30);
+    setStatus('Cerco nell’area visualizzata...', true);
+    await stagedLoad(c.lat, c.lng, 0);
+  });
+  els.moreBtn.addEventListener('click', async () => {
+    if(!currentCenter) return;
+    const c = currentCenter;
+    if(stagedIndex < staged.length-1){
+      stagedIndex++;
+      const r = staged[stagedIndex];
+      setStatus('Espando a '+r+' km...', true);
+      const points = await loadRadius(c.lat, c.lng, r);
+      const newly = points.filter(p => !combinedPoints.some(e => haversine(e.lat,e.lon,p.lat,p.lon) < 20));
+      if(newly.length){
+        combinedPoints = dedupeByProximity(combinedPoints.concat(newly), 20);
+        batchAddMarkers(newly);
+        renderList(combinedPoints);
+      }
+      setStatus('Trovati '+combinedPoints.length+' punti (entro '+r+' km).', stagedIndex < staged.length-1);
+      els.moreBtn.style.display = (stagedIndex < staged.length-1) ? 'inline-block' : 'none';
+    } else {
+      els.moreBtn.style.display = 'none';
+    }
+  });
 
-    // Basic tests (logging to console) to catch regressions
-    (function runTests(){
-      const t1 = normalizeOSM({ lat:44, lon:11, tags:{ 'socket:type2':'yes', fee:'no' }});
-      console.assert(t1 && t1.free===true, 'OSM: fee=no => free');
-      console.assert(t1.connectors.includes('Type2'), 'OSM: socket:type2 yes => Type2');
-      const t2 = normalizeOSM({ lat:44, lon:11, tags:{ 'socket:type2':'0', fee:'no' }});
-      console.assert(!t2.connectors.includes('Type2'), 'OSM: socket:type2 0 => no connector');
-      console.assert(isOCMFree('Free charging for customers')===true, 'OCM: "Free" => true');
-      console.assert(isOCMFree('€ 0')===true, 'OCM: "€ 0" => true');
-      console.assert(isOCMFree('1€/kWh')===false, 'OCM: explicit cost => false');
-      console.log('✅ Test base completati');
-    })();
+  /* ===================== AVVIO RAPIDO ===================== */
+  addEventListener('load', async () => {
+    els.radius.value = 10; els.radiusOut.textContent = '10';
+    const c = map.getCenter();
+    currentCenter = c;
+    markers.clearLayers(); els.list.textContent='';
+    combinedPoints = [];
+    staged = [5,10,20,30];
+    setStatus('Carico punti vicini (5 km)...', true);
+    await stagedLoad(c.lat, c.lng, 0);
+  });
   </script>
 </body>
 </html>
